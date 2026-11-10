@@ -135,3 +135,36 @@ fn an_authenticated_reply_over_the_reply_cap_is_refused() {
     let lines = seen(&rx);
     assert!(lines.iter().any(|l| l.contains(KEY)), "{lines:?}");
 }
+
+#[test]
+fn a_reply_at_the_cap_is_taken_and_one_past_it_is_refused() {
+    // The boundary of the authenticated reply cap (MAX_REPLY, 8 MiB): a reply line that fits —
+    // the JSON envelope plus the newline included — is taken whole; one byte more is refused.
+    // base64 of a screenshot PNG expands by 4/3, so the envelope and newline are the parts the
+    // cap must still hold after the encoded data.
+    // The reply is sized by serializing it with its id (the listener adds the same one), then
+    // padding the data field so the line plus its newline is exactly `total` bytes.
+    fn reply_of(req: &Value, total: usize) -> Value {
+        let mut r = json!({"ok": true, "id": req["id"].clone(), "result": {"data": ""}});
+        let base = r.to_string();
+        let pad = total - 1 - base.len();
+        r["result"]["data"] = json!("x".repeat(pad));
+        r
+    }
+    // Exactly the cap: the line is `cap - 1` bytes, the newline brings it to `cap` — taken.
+    let (port, _rx) = listener_with(
+        |n| json!({"ok": true, "result": {"proof": mailcraft_control_key::proof::proof(KEY, n)}}),
+        |req| reply_of(req, 1 << 23),
+    );
+    let mut r = Remote::connect_with_key(&format!("127.0.0.1:{port}"), KEY).unwrap();
+    let reply = r.call("ui.screenshot", json!({})).unwrap();
+    assert_eq!(reply["ok"], Value::Null, "the result is the data field");
+    // One byte more: refused by name.
+    let (port, _rx) = listener_with(
+        |n| json!({"ok": true, "result": {"proof": mailcraft_control_key::proof::proof(KEY, n)}}),
+        |req| reply_of(req, (1 << 23) + 1),
+    );
+    let mut r = Remote::connect_with_key(&format!("127.0.0.1:{port}"), KEY).unwrap();
+    let e = r.call("ui.screenshot", json!({})).unwrap_err();
+    assert!(e.contains("reply too long"), "{e}");
+}

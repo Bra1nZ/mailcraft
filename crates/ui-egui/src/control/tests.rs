@@ -44,3 +44,41 @@ fn a_request_marks_the_window_driven_only_while_it_is_handled() {
         assert_eq!(app.driven, before);
     }
 }
+
+mod screenshot_budget {
+    use super::*;
+
+    /// A screenshot whose PNG doesn't fit the inline budget is scaled down to it, and the
+    /// answer says so: the scaled image rides in an authenticated reply line, which the MCP
+    /// bridge caps at 8 MiB, so base64 of the PNG plus the envelope must stay under it.
+    #[test]
+    fn a_png_over_the_budget_is_scaled_to_fit() {
+        // Noise hardly compresses, so a small image is enough to exceed a small budget.
+        let size = 96;
+        let mut pixels = Vec::with_capacity(size * size);
+        for y in 0..size {
+            for x in 0..size {
+                pixels.push(egui::Color32::from_rgb((x * 7 % 256) as u8, (y * 13 % 256) as u8, (x * y % 256) as u8));
+            }
+        }
+        let image = egui::ColorImage { size: [size, size], source_size: egui::Vec2::new(size as f32, size as f32), pixels };
+        let r = super::super::inline_screenshot_within(&image, 1024);
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert_eq!(r["result"]["scaled"], json!(true), "{r}");
+        assert!((r["result"]["width"].as_u64().unwrap_or(0)) < size as u64, "{r}");
+        // The delivered PNG, encoded, stays under the budget the bridge reads with.
+        let data = mailcraft_engine::cmd::base64_decode(r["result"]["data"].as_str().unwrap_or_default()).unwrap();
+        assert!(data.len() <= 1024, "{r}");
+    }
+
+    /// A screenshot whose PNG fits is delivered as-is: no scaling, no changed dimensions.
+    #[test]
+    fn a_png_within_the_budget_is_not_scaled() {
+        let image = egui::ColorImage { size: [4, 4], source_size: egui::Vec2::new(4.0, 4.0), pixels: vec![egui::Color32::BLACK; 16] };
+        let r = super::super::inline_screenshot_within(&image, mailcraft_engine::cmd::INLINE_SCREENSHOT_PNG_BUDGET);
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert_eq!(r["result"]["scaled"], json!(false), "{r}");
+        assert_eq!(r["result"]["width"].as_u64(), Some(4), "{r}");
+        assert_eq!(r["result"]["height"].as_u64(), Some(4), "{r}");
+    }
+}

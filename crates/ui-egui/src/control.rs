@@ -400,18 +400,44 @@ fn dispatch(app: &mut MailApp, ctx: &egui::Context, req: &ControlRequest) -> Out
     }
 }
 
-/// The window as PNG, base64 in the answer (`data`).
+/// The window as PNG, base64 in the answer (`data`). The screenshot rides in an authenticated
+/// reply line, which the MCP bridge caps at 8 MiB, so the PNG is bounded: one that doesn't fit
+/// is scaled down to the budget and the answer says so (`scaled`).
 pub fn inline_screenshot(image: &egui::ColorImage) -> Value {
+    inline_screenshot_within(image, mailcraft_engine::cmd::INLINE_SCREENSHOT_PNG_BUDGET)
+}
+
+fn inline_screenshot_within(image: &egui::ColorImage, budget: usize) -> Value {
     let [w, h] = image.size;
     let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
     let Some(buffer) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {
         return json!({"ok": false, "error": "the screenshot had no pixels"});
     };
-    let mut png = std::io::Cursor::new(Vec::new());
-    if let Err(e) = buffer.write_to(&mut png, image::ImageFormat::Png) {
-        return json!({"ok": false, "error": e.to_string()});
-    }
-    json!({"ok": true, "result": {"data": mailcraft_engine::cmd::base64_encode(png.get_ref()), "width": w, "height": h}})
+    let png_of = |img: &image::RgbaImage| -> Result<Vec<u8>, String> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png)
+            .map(|_| png.into_inner())
+            .map_err(|e| e.to_string())
+    };
+    // Halve until the PNG fits the inline budget (at most one halving per dimension step, so a
+    // 8K screenshot settles in ~13 steps); a floor of one pixel keeps the loop finite.
+    let mut owned: Option<image::RgbaImage> = None;
+    let (png, scaled) = loop {
+        let cur = owned.as_ref().unwrap_or(&buffer);
+        let png = match png_of(cur) {
+            Ok(p) => p,
+            Err(e) => return json!({"ok": false, "error": e}),
+        };
+        if png.len() <= budget || cur.width() <= 1 || cur.height() <= 1 {
+            break (png, owned.is_some());
+        }
+        let nw = (cur.width() / 2).max(1);
+        let nh = (cur.height() / 2).max(1);
+        owned = Some(image::imageops::resize(cur, nw, nh, image::imageops::FilterType::Triangle));
+    };
+    let dims = owned.as_ref().map(|img| (img.width(), img.height()));
+    let (w, h) = dims.unwrap_or((w as u32, h as u32));
+    json!({"ok": true, "result": {"data": mailcraft_engine::cmd::base64_encode(&png), "width": w, "height": h, "scaled": scaled}})
 }
 
 pub fn save_screenshot(image: &egui::ColorImage, path: Option<&str>) -> Value {

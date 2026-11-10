@@ -387,6 +387,12 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     mailcraft_charset::base64::STANDARD.encode(bytes)
 }
 
+/// The most a screenshot's PNG may hold before base64. The screenshot rides in an
+/// authenticated reply line, which the MCP bridge caps at 8 MiB (`MAX_REPLY`,
+/// `crates/mcp/src/backend.rs`), and base64 expands by 4/3, so the PNG is capped
+/// under 3/4 of that with room for the JSON envelope and the newline.
+pub const INLINE_SCREENSHOT_PNG_BUDGET: usize = (6 << 20) - (4 << 10);
+
 pub fn base64_decode(text: &str) -> Result<Vec<u8>, CmdError> {
     let clean: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     mailcraft_charset::base64::STANDARD.decode(clean).map_err(|_| bad("`data` must be base64"))
